@@ -1,116 +1,101 @@
-systemd
-=====
+# systemd
 
 [![Hex.pm](https://img.shields.io/hexpm/v/systemd?style=flat-square)](https://hex.pm/packages/systemd)
 [![HexDocs](https://img.shields.io/badge/HexDocs-docs-blue?style=flat-square)](https://hexdocs.pm/systemd/)
-[![Hex.pm License](https://img.shields.io/hexpm/l/systemd?style=flat-square)](https://tldrlegal.com/license/apache-license-2.0-(apache-2.0))
+[![Hex.pm License](https://img.shields.io/hexpm/l/systemd?style=flat-square)](<https://tldrlegal.com/license/apache-license-2.0-(apache-2.0)>)
 [![GitHub Workflow Status](https://img.shields.io/github/workflow/status/hauleth/erlang-systemd/Erlang%20CI?style=flat-square)](https://github.com/hauleth/erlang-systemd/actions)
 [![Codecov](https://img.shields.io/codecov/c/gh/hauleth/erlang-systemd?style=flat-square)](https://codecov.io/gh/hauleth/erlang-systemd)
 
-Simple library for notifying systemd about process state.
+Systemd utilities for Erlang applications.
 
 ## Features
 
-- `NOTIFY_SOCKET` communication with supervising process.
-- Watchdog process will be started automatically (if not disabled). It will also
-  handle sending keep-alive messages automatically.
-- Fetching file descritors passed by the supervisor.
-- `journal` logger handler and formatters.
+- [Notify Socket](https://www.freedesktop.org/software/systemd/man/sd_notify.html) which allows applications to send notifications to systemd.
+- [Watchdog](https://www.freedesktop.org/software/systemd/man/sd_watchdog_enabled.html) which allows applications to integrate with watchdog of systemd.
+- [Listen FDs](https://www.freedesktop.org/software/systemd/man/sd_listen_fds.html) which helps applications to use socket activation with ease.
+- Logger handler and formatters for [`journald`](https://www.freedesktop.org/software/systemd/man/systemd-journald.service.html).
 
 ## Installation
 
-Just add this to your `rebar.config`:
+In case of Rebar project, add this to your `rebar.config`:
 
 ```erlang
 {deps, [systemd]}.
 ```
 
-Or in case of Mix project, to your `mix.exs`:
-
-```elixir
-defp deps do
-  [
-    {:systemd, "~> 0.6"}
-  ]
-end
-```
-
-Then call `systemd:notify(ready)` when your application is ready to work/accept
-connections or add `systemd:ready()` as a child of your application's main supervisor.
-
 ### Non-systemd systems
 
-This application and all functions within are safe to call even in non-systemd
-and non-Linux OSes. In case if there is no systemd configuration options then
-all functions will simply work as (almost) no-ops.
+In non-systemd systems, all functionalities in this library will simply work as (almost) no-ops, which are safe to use.
 
-## Usage
+## Usage - starting point
 
-Assuming you have `my_app.service` unit like that
+Suppose that the systemd unit file is `my_app.service`, and the initial content of this file is:
 
 ```ini
 [Unit]
-Description=My Awesome App
+Description=My App
 
 [Service]
 User=appuser
 Group=appgroup
-# This will allow using `systemd:notify/1` for informing the system supervisor
-# about application status.
-Type=notify
+
 # Application need to start in foreground instead of forking into background,
 # otherwise it may be not correctly detected and system will try to start it
 # again.
 ExecStart=/path/to/my_app start
-# Enable watchdog process, which will expect messages in given timeframe,
-# otherwise it will restart the process as a defunct. It should be managed
-# automatically by `systemd` application in most cases and will send messages
-# twice as often as requested.
-#
-# You can force failure by using `systemd:watchdog(trigger)` or manually ping
-# systemd watchdog via `systemd:watchdog(ping)`.
-WatchdogSec=10s
-Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-You can inform systemd about state of your application. To do so just call:
+> In the following sections, above systemd unit file will be updated as required.
+
+## Usage - Notify Socket
+
+This is used to notify systemd the state of applications.
+
+### Why you need this?
+
+> In short, it is useful for signaling readiness.
+
+When VM starts, applications rarely are ready to work. They often require some extra setup, such as establishing DB connections, setting up an HTTP server, etc. This setup process may take some noteworthy time.
+
+By leveraging this feature, applications can be explicitly notify systemd that they are ready to work.
+
+### Setup
+
+This feature requires setup on both systemd side and application side.
+
+On systemd side, the type of systemd unit should be changed to `Type=notify`:
+
+```ini
+[Unit]
+Description=My App
+
+[Service]
+User=appuser
+Group=appgroup
+
+# added
+Type=notify
+
+ExecStart=/path/to/my_app start
+
+[Install]
+WantedBy=multi-user.target
+```
+
+On application side, you need notify systemd the state of your application.
+
+Let's say, you want to notify systemd that the application is ready, then you can use `systemd:notify/1`:
 
 ```erlang
-% Erlang
 systemd:notify(ready).
 ```
 
-```elixir
-# Elixir
-:systemd.notify(:ready)
-```
-
-This will make `systemctl start my_app.service` to wait until application is up
-and running.
-
-If you want to restart your application you can notify systemd about it with:
+To simplify ready notification, you can also utilize the `systemd:ready/0` function, which returns child specs that can be used as part of your supervision tree to indicate when the application is ready:
 
 ```erlang
-% Erlang
-systemd:notify(reloading).
-```
-
-```elixir
-# Elixir
-:systemd.notify(:reloading)
-```
-
-Message about application shutting down will be handled automatically for you.
-
-For simplification of readiness notification there is `systemd:ready()` function
-that returns child specs for temporary process that can be used as a part of
-your supervision tree to mark the point when application is ready, ex.:
-
-```erlang
-% Erlang
 -module(my_app_sup).
 
 -behaviour(supervisor).
@@ -135,40 +120,105 @@ init(_Opts) ->
     {ok, {SupFlags, Children}}.
 ```
 
-```elixir
-# Elixir
-defmodule MyProject.Application do
-  use Application
+Read the doc of `systemd:notify/1` for more details.
 
-  def start(_type, _opts) do
-    children = [
-      MyProject.Repo,
-      MyProjectWeb.Endpoint,
-      :systemd.ready() # <- IMPORTANT - this is a function call (it returns the proper child spec)
-    ]
+## Usage - Watchdog
 
-    Supervisor.start_link(children, strategy: :one_for_one)
-  end
-end
+Watchdog is heart-beat subsystem of systemd. It's used for monitoring the state of applications and taking appropriate action in the event of a fault.
+
+### Why you need this?
+
+> In short, it is useful for probing liveness.
+
+Watchdog can help to improve the reliability and availability of applications. For example, if a application becomes non-responsive, but it refuses to die, the watchdog can detect it, and automatically handle it without the need for manual intervention.
+
+### Setup
+
+This feature requires setup on both systemd side and application side.
+
+On systemd side, the `WatchdogSec` parameter of systemd unit should be set:
+
+```ini
+[Unit]
+Description=My App
+
+[Service]
+User=appuser
+Group=appgroup
+
+Type=notify
+
+ExecStart=/path/to/my_app start
+
+# added
+#
+# Enable the watchdog on the systemd side - expect notifications sent from application
+# within a certain time interval.
+WatchdogSec=10s
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### Logs
+On application side, the watchdog will be setup (sending keep-alive notifications) automatically. But, you still have options to do that manually:
 
-To handle logs you have 2 possible options:
+- send a keep-alive notification to systemd watchdog via `systemd:watchdog(ping)`
+- trigger an action specified by `Restart=` via `systemd:watchdog(trigger)`
+
+Read the doc of `systemd:watchdog/1` for more details.
+
+## Usage - Listen FDs
+
+### Why you need this?
+
+> In short, it makes the deployment process more graceful.
+
+This is a required feature for implementing socket activation. And, socket activation is useful when you want:
+
+- starting application only when there is incoming data in socket.
+- keeping sockets opened between restarts.
+- ...
+
+### Setup
+
+This feature requires setup on both systemd side and application side.
+
+On systemd side, a socket unit file - `my_app.socket` should be created:
+
+```ini
+[Unit]
+Description=Listening socket
+Requires=sockets.target
+
+[Socket]
+ListenStream=8080
+ReusePort=true
+NoDelay=true
+```
+
+On application side, you can use the function related to this feature - `systemd:listen_fds/0`, which returns all file descriptors passed from systemd to the service unit.
+
+Read the source code in [examples/](./examples/) for more examples.
+
+Read the doc of `systemd:listen_fds/0` for more details.
+
+## Usage - Logger handler and formatters
+
+To handle logs, you have 2 possible options:
 
 - Output data to standard output or error with special prefixes. This approach
-  is much simpler and straightforward, however do not support structured logging
+  is much simpler and straightforward, however it doesn't support structured logging
   and multiline messages.
 - Use datagram socket with special communication protocol. This requires a
   little bit more effort to set up, but seamlessly supports structured logging
   and multiline messages.
 
-This library supports both formats, and it is up to You which one (or
-both?) your app will decide to use.
+This library supports both formats, and it is up to you which one (or both?) your application will decide to use.
 
-#### Erlang
+### Erlang
 
-##### Standard error
+#### Standard output or error
 
 There is `systemd_kmsg_formatter` which formats data using `kmsg`-like level
 prefixes can be used with any logger that outputs to standard output or
@@ -179,14 +229,13 @@ via `JOURNAL_STREAM` environment variable). You can disable that behaviour by
 setting:
 
 ```erlang
-% Erlang
 [
   {systemd, [{auto_formatter, false}]}
 ].
 ```
 
 For custom loggers you can use this formatter by adding new option `parent` to
-the formatter options that will be used as "upstream" formatter, ex.:
+the formatter options that will be used as "upstream" formatter, for example:
 
 ```erlang
 logger:add_handler(example_handler, logger_disk_log_h, #{
@@ -198,7 +247,7 @@ logger:add_handler(example_handler, logger_disk_log_h, #{
 }).
 ```
 
-##### Datagram socket
+#### Datagram socket
 
 This one requires `systemd` application to be started to spawn some processes
 required for handling sockets, so the best way to handle it is to add predefined
@@ -210,14 +259,14 @@ logger:remove_handler(default).
 ```
 
 Be aware that this one is **not** guaranteed to work on non-systemd systems, so
-if You aren't sure if that application will be ran on systemd-enabled OS then
+if you aren't sure if that application will be ran on systemd-enabled systems then
 you shouldn't use it as an only logger solution in your application or you can
 end with no logger attached at all.
 
 This handler **should not** be used with `systemd_kmsg_formatter` as this will
 result with pointless `kmsg`-like prefixes in the log messages.
 
-You can also "manually" configgure handler if you want to configure formatter:
+You can also "manually" configure handler if you want to configure formatter:
 
 ```erlang
 logger:add_handler(my_handler, systemd_journal_h, #{
@@ -226,37 +275,40 @@ logger:add_handler(my_handler, systemd_journal_h, #{
 logger:remove_handler(default).
 ```
 
-#### Elixir
+### Elixir
 
 This assumes Elixir 1.10+, as earlier versions do not use Erlang's `logger`
 module for dispatching logs.
 
-##### Standard error
+#### Standard output and error
 
 `systemd` has Erlang's `logger` backend, which mean that you have 2 ways of
 achieving what is needed:
 
 1. Disable Elixir's backends and just rely on default Erlang's handler:
-  ```elixir
-  # config/config.exs
-  config :logger,
-    backends: [],
-    handle_otp_reports: false,
-    handle_sasl_reports: false
-  ```
-  And then allow `systemd` to make its magic that is used in "regular" Erlang
-  code.
+
+```elixir
+# config/config.exs
+config :logger,
+  backends: [],
+  handle_otp_reports: false,
+  handle_sasl_reports: false
+```
+
+And then allow `systemd` to make its magic that is used in "regular" Erlang
+code.
 
 2. "Manually" add handler that will use `systemd_kmsg_formatter`:
-  ```elixir
-  # In application start/2 callback
-  :ok = :logger.add_handler(
-    :my_handler,
-    :logger_std_h,
-    %{formatter: {:systemd_kmsg_formatter, %{}}}
-  )
-  Logger.remove_backend(:console)
-  ```
+
+```elixir
+# In application start/2 callback
+:ok = :logger.add_handler(
+  :my_handler,
+  :logger_std_h,
+  %{formatter: {:systemd_kmsg_formatter, %{}}}
+)
+Logger.remove_backend(:console)
+```
 
 However remember, that currently (as Elixir 1.11) there is no "Elixir formatter"
 for Erlang's `logger` implementation, so you can end with Erlang-style
@@ -285,12 +337,16 @@ Logger.remove_backend(:console)
 ```
 
 Be aware that this one is **not** guaranteed to work on non-systemd systems, so
-if You aren't sure if that application will be ran on systemd-enabled OS then
+if you aren't sure if that application will be ran on systemd-enabled systems then
 you shouldn't use it as an only logger solution in your application or you can
 end with no logger attached at all.
 
 This handler **should not** be used with `:systemd_kmsg_formatter` as this will
 result with pointless `kmsg`-like prefixes in the log messages.
+
+## More
+
+- [Who Watches Watchmen? - Part 1](https://hauleth.dev/post/who-watches-watchmen-i)
 
 ## License
 
